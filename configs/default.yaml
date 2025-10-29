@@ -1,0 +1,41 @@
+# GraphMERT Training Configuration
+# Based on paper parameters (Section 5.1.2)
+
+# Model architecture
+model:
+  base_model: "microsoft/codebert-base"  # Can also use: "roberta-base", "huggingface/CodeBERTa-small-v1"
+  hidden_size: 512                       # Paper: 512 (NOTE: Overridden to 768 when loading from CodeBERT)
+  num_layers: 12                         # Paper: 12
+  num_attention_heads: 8                 # Paper: 8 (NOTE: Overridden to 12 when loading from CodeBERT)
+  use_h_gat: true                        # Enable H-GAT graph fusion
+  use_decay_mask: true                   # Enable attention decay mask
+  attention_decay_rate: 0.6              # Paper: λ = 0.6 (exponential decay base)
+
+# Training parameters
+training:
+  num_epochs: 25                         # Paper: 25
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0004                  # Paper: 4e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1                      # 10% of steps
+  max_grad_norm: 1.0
+
+  # Loss weights
+  lambda_mlm: 0.6                        # Paper: 0.6 (60% MLM, 40% MNM)
+  mask_prob: 0.15                        # Standard BERT masking
+
+# Data
+data:
+  max_seq_len: 512
+  max_leaves_per_token: 10               # Max KG triples per token
+  val_split: 0.1
+  language: "python"                     # Code language
+
+# System
+system:
+  output_dir: "./checkpoints"
+  device: "cuda"                         # or "cpu"
+  seed: 42
+  use_wandb: false
+  num_workers: 4

@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+
+# Model outputs (exclude trained models)
+checkpoints/
+outputs/
+wandb/
+*.pt
+*.pth
+*.bin
+
+# Training data (users provide their own)
+# IMPORTANT: /data/ excludes top-level data folder, NOT graphmert/data/ code
+/data/
+*.txt
+!examples/sample_data.txt
+!requirements.txt
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Exclude extra docs and test files
+test_model.py
+test_installation.py
+ARCHITECTURE.md
+CHAIN_GRAPH_SUMMARY.md
+EXTRACTION_GUIDE.md
+GETTING_STARTED.md
+INSTALL.md
+PAPER_ALIGNMENT_FIXES.md
+PROJECT_SUMMARY.md
+TEST_IMPROVEMENTS.md
+TESTING.md
+PUBLISH_CHECKLIST.txt
+2510.pdf
+zvdb/
+.claude/
+scripts/
