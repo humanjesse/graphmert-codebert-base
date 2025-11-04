@@ -11,7 +11,7 @@
 A knowledge-graph-enhanced transformer for code understanding, based on the GraphMERT architecture.
 (Currently working on getting some training data.)
 
-**What is GraphMERT?** It's CodeBERT (RoBERTa trained on code) enhanced with graph structure. It learns from both the *syntax* of code (tokens) and its *semantics* (knowledge graph relations like "function X calls function Y").
+**What is graphmert-codebert-base** It's CodeBERT (RoBERTa trained on code) enhanced with graph structure. It learns from both the *syntax* of code (tokens) and its *semantics* (knowledge graph relations like "function X calls function Y").
 
 ## Key Features
 
