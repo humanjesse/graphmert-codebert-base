@@ -13,6 +13,8 @@ A knowledge-graph-enhanced transformer for code understanding, based on the Grap
 
 **What is graphmert-codebert-base** It's CodeBERT (RoBERTa trained on code) enhanced with graph structure. It learns from both the *syntax* of code (tokens) and its *semantics* (knowledge graph relations like "function X calls function Y").
 
+Concepts adapted from this paper: https://arxiv.org/abs/2510.09580
+
 ## Key Features
 
 - **Leafy Chain Graphs**: Innovative data structure linking code tokens to knowledge graph triples
