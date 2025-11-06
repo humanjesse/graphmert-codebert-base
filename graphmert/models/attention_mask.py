@@ -13,29 +13,35 @@ from typing import Optional
 
 def compute_graph_distances(
     graph_structure: torch.Tensor,
+    num_roots: int = 128,
+    leaves_per_root: int = 7,
     max_distance: int = 10
 ) -> torch.Tensor:
     """
-    Compute shortest path distances in the leafy chain graph using Floyd-Warshall.
+    Compute shortest path distances in the fixed root-leaf chain graph.
 
-    In a leafy chain graph:
-    - Roots (tokens): nodes 0, 1, ..., seq_len-1
-    - Leaves (triples): virtual nodes (encoded in graph_structure)
-    - Edges: token --(1)-- leaf --(1)-- token
-
-    This implements full shortest-path computation to handle multi-hop paths.
+    Paper's structure: [128 roots | 896 leaves] = 1024 tokens
+    - Roots at positions 0-127
+    - Leaves at positions 128-1023
+    - Root i connects to leaves at positions [128 + i*7 : 128 + i*7 + 7]
+    - Distance(root_i, leaf) = 1 if leaf is connected to root_i
+    - Distance(root_i, root_j) = 2 if they share a connected leaf
 
     Args:
-        graph_structure: [batch_size, seq_len, max_leaves]
-            For each token, indices of connected leaf nodes (-1 for no connection)
-        max_distance: Maximum distance to compute (paths longer than this set to inf)
+        graph_structure: [batch_size, 128, 7]
+            For each root, the positions of its 7 connected leaves
+            -1 indicates no connection
+        num_roots: Number of root positions (128)
+        leaves_per_root: Number of leaves per root (7)
+        max_distance: Maximum distance to compute
 
     Returns:
-        distances: [batch_size, seq_len, seq_len]
-            Shortest path distance matrix between all token pairs
+        distances: [batch_size, 1024, 1024]
+            Shortest path distance matrix for the full sequence
     """
-    batch_size, seq_len, max_leaves = graph_structure.size()
+    batch_size = graph_structure.size(0)
     device = graph_structure.device
+    seq_len = num_roots + num_roots * leaves_per_root  # 1024
 
     # Initialize distance matrix with infinity
     distances = torch.full(
@@ -49,45 +55,56 @@ def compute_graph_distances(
     for i in range(seq_len):
         distances[:, i, i] = 0.0
 
-    # Build adjacency matrix for leafy chain graph
-    # If tokens i and j share a leaf, they are connected with distance 2 (i → leaf → j)
+    # Build adjacency based on fixed root-leaf structure
     for batch_idx in range(batch_size):
-        # For each pair of tokens, check if they share any leaves
-        for i in range(seq_len):
-            leaves_i = graph_structure[batch_idx, i]
+        # For each root
+        for root_idx in range(num_roots):
+            # Get connected leaf positions for this root
+            leaf_positions = graph_structure[batch_idx, root_idx]  # [7]
+            valid_leaves = leaf_positions[leaf_positions != -1]
+
+            if len(valid_leaves) == 0:
+                continue
+
+            # Distance from root to its connected leaves is 1
+            for leaf_pos in valid_leaves:
+                leaf_pos = leaf_pos.item()
+                distances[batch_idx, root_idx, leaf_pos] = 1.0
+                distances[batch_idx, leaf_pos, root_idx] = 1.0
+
+        # Compute root-to-root distances via shared leaves
+        for root_i in range(num_roots):
+            leaves_i = graph_structure[batch_idx, root_i]
             valid_leaves_i = leaves_i[leaves_i != -1]
 
             if len(valid_leaves_i) == 0:
                 continue
 
-            for j in range(i + 1, seq_len):
-                leaves_j = graph_structure[batch_idx, j]
+            for root_j in range(root_i + 1, num_roots):
+                leaves_j = graph_structure[batch_idx, root_j]
                 valid_leaves_j = leaves_j[leaves_j != -1]
 
                 if len(valid_leaves_j) == 0:
                     continue
 
-                # Check if i and j share any leaves
-                # Shared leaf means distance = 2 (i → leaf → j)
+                # Check if roots share any leaves
+                # Distance = 2 (root_i → shared_leaf → root_j)
                 for leaf_i in valid_leaves_i:
-                    if torch.isin(leaf_i, valid_leaves_j).any():
-                        distances[batch_idx, i, j] = 2.0
-                        distances[batch_idx, j, i] = 2.0
-                        break  # Found connection, no need to check more
+                    if (leaf_i.unsqueeze(0) == valid_leaves_j).any():
+                        distances[batch_idx, root_i, root_j] = 2.0
+                        distances[batch_idx, root_j, root_i] = 2.0
+                        break
 
-    # Floyd-Warshall algorithm to compute all-pairs shortest paths
-    # This will find multi-hop paths like: token_A → leaf1 → token_B → leaf2 → token_C
-    for batch_idx in range(batch_size):
-        for k in range(seq_len):
-            for i in range(seq_len):
-                for j in range(seq_len):
-                    # Relax edge: if path i→k→j is shorter than current i→j, update
-                    new_dist = distances[batch_idx, i, k] + distances[batch_idx, k, j]
-                    if new_dist < distances[batch_idx, i, j]:
-                        distances[batch_idx, i, j] = new_dist
+    # Floyd-Warshall for multi-hop paths (optional, can be expensive)
+    # Uncomment if you need multi-hop reasoning beyond immediate connections
+    # for batch_idx in range(batch_size):
+    #     for k in range(seq_len):
+    #         for i in range(seq_len):
+    #             for j in range(seq_len):
+    #                 new_dist = distances[batch_idx, i, k] + distances[batch_idx, k, j]
+    #                 if new_dist < distances[batch_idx, i, j]:
+    #                     distances[batch_idx, i, j] = new_dist
 
-    # Keep distances as-is (including inf for unreachable nodes)
-    # Don't clamp to max_distance - let the decay formula handle it
     return distances
 
 
@@ -97,6 +114,8 @@ def create_leafy_chain_attention_mask(
     batch_size: int,
     decay_rate: float = 0.6,  # λ = 0.6 from paper Section 2.7.2, Equation 8
     distance_offset = 1.0,  # p parameter from Equation 8 (learnable nn.Parameter or float)
+    num_roots: int = 128,
+    leaves_per_root: int = 7,
     device: torch.device = None
 ) -> torch.Tensor:
     """
@@ -111,12 +130,14 @@ def create_leafy_chain_attention_mask(
     - GELU: Gaussian Error Linear Unit activation
 
     Args:
-        graph_structure: [batch_size, seq_len, max_leaves]
-            Leafy chain graph structure
-        seq_len: Sequence length
+        graph_structure: [batch_size, 128, 7]
+            Fixed root-leaf structure
+        seq_len: Sequence length (should be 1024)
         batch_size: Batch size
         decay_rate: Exponential decay rate (λ = 0.6 from paper)
         distance_offset: Distance offset parameter (p in equation). Can be float or nn.Parameter.
+        num_roots: Number of root positions (128)
+        leaves_per_root: Number of leaves per root (7)
         device: Device to create tensor on
 
     Returns:
@@ -130,8 +151,8 @@ def create_leafy_chain_attention_mask(
     if graph_structure is None:
         return torch.ones(batch_size, seq_len, seq_len, device=device)
 
-    # Compute graph distances
-    distances = compute_graph_distances(graph_structure)
+    # Compute graph distances using fixed structure
+    distances = compute_graph_distances(graph_structure, num_roots, leaves_per_root)
 
     # Apply the full transformation from Equation 8:
     # mask = λ ^ GELU(√(distance) - p)

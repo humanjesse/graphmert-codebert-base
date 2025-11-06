@@ -35,8 +35,12 @@ class GraphMERTConfig(RobertaConfig):
         use_decay_mask: bool = True,
         attention_decay_rate: float = 0.6,  # λ = 0.6 from paper Section 2.7.2, Equation 8
         distance_offset_init: float = 1.0,  # Initial value for learnable p parameter from Equation 8
+        max_position_embeddings: int = 1024,  # Extended for [128 roots | 896 leaves] structure
         **kwargs
     ):
+        # Set max_position_embeddings and type_vocab_size before calling super().__init__
+        kwargs['max_position_embeddings'] = max_position_embeddings
+        kwargs['type_vocab_size'] = 2  # Need 2 types: 0=root, 1=leaf (RoBERTa default is 1)
         super().__init__(**kwargs)
         self.num_relations = num_relations
         self.use_h_gat = use_h_gat
@@ -160,22 +164,25 @@ class GraphMERTModel(RobertaPreTrainedModel):
     @classmethod
     def from_codebert(cls, codebert_model_name: str = "microsoft/codebert-base", **kwargs):
         """
-        Initialize from pre-trained CodeBERT.
+        Initialize from pre-trained CodeBERT with extended position embeddings.
 
         Args:
             codebert_model_name: HuggingFace model name
             **kwargs: Additional config parameters (num_relations, etc.)
 
         Returns:
-            GraphMERT model with CodeBERT weights
+            GraphMERT model with CodeBERT weights and extended position embeddings (514→1024)
         """
         # Load CodeBERT config
         base_config = RobertaConfig.from_pretrained(codebert_model_name)
 
-        # Create GraphMERT config
-        config = GraphMERTConfig(**base_config.to_dict(), **kwargs)
+        # Create GraphMERT config with extended position embeddings
+        # Explicitly set max_position_embeddings to 1024 (overrides base_config's 514)
+        config_dict = base_config.to_dict()
+        config_dict['max_position_embeddings'] = 1024  # Force 1024 tokens
+        config = GraphMERTConfig(**config_dict, **kwargs)
 
-        # Initialize model
+        # Initialize model (creates 1024 position embeddings)
         model = cls(config)
 
         # Load CodeBERT weights for encoder
@@ -186,8 +193,44 @@ class GraphMERTModel(RobertaPreTrainedModel):
 
         # Transfer standard embedding weights (H-GAT is randomly initialized)
         model.embeddings.word_embeddings.load_state_dict(codebert.embeddings.word_embeddings.state_dict())
-        model.embeddings.position_embeddings.load_state_dict(codebert.embeddings.position_embeddings.state_dict())
-        model.embeddings.token_type_embeddings.load_state_dict(codebert.embeddings.token_type_embeddings.state_dict())
+
+        # === EXTEND POSITION EMBEDDINGS: 514 → 1024 ===
+        # Copy original embeddings (positions 0-513)
+        orig_pos_emb = codebert.embeddings.position_embeddings.weight.data  # [514, 768]
+        new_pos_emb = model.embeddings.position_embeddings.weight.data      # [1024, 768]
+
+        # Copy pretrained positions
+        new_pos_emb[:514] = orig_pos_emb
+
+        # Random initialization for new positions (514-1023)
+        # Using normal distribution matching RoBERTa's initialization
+        torch.nn.init.normal_(new_pos_emb[514:], mean=0.0, std=config.initializer_range)
+
+        # Update position_ids buffer to match new size
+        model.embeddings.register_buffer(
+            "position_ids",
+            torch.arange(config.max_position_embeddings).expand((1, -1)),
+            persistent=False
+        )
+
+        print(f"Extended position embeddings: 514 → 1024")
+        print(f"  - Positions 0-513: Copied from CodeBERT")
+        print(f"  - Positions 514-1023: Random init (std={config.initializer_range})")
+
+        # Transfer token_type_embeddings (extend from 1 to 2 types)
+        # CodeBERT has type_vocab_size=1, we need 2 (0=root, 1=leaf)
+        orig_type_emb = codebert.embeddings.token_type_embeddings.weight.data  # [1, 768]
+        new_type_emb = model.embeddings.token_type_embeddings.weight.data      # [2, 768]
+
+        # Copy the first type embedding
+        new_type_emb[0] = orig_type_emb[0]
+
+        # Random init for second type (leaf tokens)
+        torch.nn.init.normal_(new_type_emb[1:], mean=0.0, std=config.initializer_range)
+
+        print(f"Extended token_type_embeddings: 1 → 2 types")
+
+        # Transfer LayerNorm
         model.embeddings.LayerNorm.load_state_dict(codebert.embeddings.LayerNorm.state_dict())
 
         if model.pooler is not None and hasattr(codebert, 'pooler'):

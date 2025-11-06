@@ -49,3 +49,7 @@ PUBLISH_CHECKLIST.txt
 zvdb/
 .claude/
 scripts/
+
+# Archive folders
+archive*/
+archive_old_*/

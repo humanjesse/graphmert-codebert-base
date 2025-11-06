@@ -523,3 +523,190 @@ def create_mnm_labels(
     masked_relation_ids[masked_indices] = mask_relation_id
 
     return masked_relation_ids, labels
+
+
+# ==================== Fixed Root-Leaf Chain Masking (Paper Structure) ====================
+
+
+def create_root_only_mlm_labels(
+    input_ids: torch.Tensor,
+    mask_token_id: int,
+    vocab_size: int,
+    num_roots: int = 128,
+    mask_prob: float = 0.15,
+    max_span_length: int = 7,
+    special_token_ids: Optional[list] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Create MLM labels for fixed root-leaf structure: ONLY mask root positions (0-127).
+
+    Paper structure: [128 roots | 896 leaves] = 1024 tokens
+    - MLM objective: Only applied to root positions (syntactic space)
+    - MNM objective: Only applied to leaf positions (semantic space)
+
+    Uses span masking with geometric distribution (max span = 7).
+
+    Args:
+        input_ids: [batch_size, 1024] - full sequence
+        mask_token_id: ID of [MASK] token
+        vocab_size: Vocabulary size
+        num_roots: Number of root positions (128)
+        mask_prob: Probability of masking root tokens (default 0.15)
+        max_span_length: Maximum span length for geometric masking (default 7)
+        special_token_ids: List of special tokens to never mask
+
+    Returns:
+        masked_input_ids: [batch_size, 1024] - input with masked roots
+        labels: [batch_size, 1024] - original tokens (-100 for non-masked and leaves)
+    """
+    labels = input_ids.clone()
+    masked_input_ids = input_ids.clone()
+    batch_size, seq_len = input_ids.shape
+
+    # Set all leaf positions to -100 (not part of MLM objective)
+    labels[:, num_roots:] = -100
+
+    # Create special tokens mask
+    special_tokens_mask = torch.zeros(batch_size, num_roots, dtype=torch.bool, device=input_ids.device)
+    if special_token_ids is not None:
+        for token_id in special_token_ids:
+            special_tokens_mask |= (input_ids[:, :num_roots] == token_id)
+
+    # Truncated geometric distribution for span lengths (SpanBERT style)
+    p = 0.2
+    probs = torch.tensor([p * (1 - p) ** (i - 1) for i in range(1, max_span_length + 1)])
+    probs /= probs.sum()
+    span_length_dist = torch.distributions.categorical.Categorical(probs=probs)
+
+    # Mask spans in root positions only
+    for batch_idx in range(batch_size):
+        masked_indices = torch.zeros(num_roots, dtype=torch.bool, device=input_ids.device)
+        num_to_mask = int(mask_prob * num_roots)
+        num_masked = 0
+
+        attempts = 0
+        max_attempts = num_roots * 2
+
+        while num_masked < num_to_mask and attempts < max_attempts:
+            attempts += 1
+
+            # Sample span length
+            span_length = span_length_dist.sample().item() + 1
+
+            # Sample span start position (only in root range)
+            max_start = num_roots - span_length
+            if max_start < 0:
+                continue
+
+            span_start = torch.randint(0, max_start + 1, (1,), device=input_ids.device).item()
+            span_end = span_start + span_length
+
+            # Check if span overlaps with special tokens or already masked
+            if special_tokens_mask[batch_idx, span_start:span_end].any():
+                continue
+            if masked_indices[span_start:span_end].any():
+                continue
+
+            # Mask the span
+            masked_indices[span_start:span_end] = True
+            num_masked += span_length
+
+        # Set labels to -100 for non-masked root tokens
+        labels[batch_idx, :num_roots][~masked_indices] = -100
+
+        # Apply masking strategy (80% [MASK], 10% random, 10% unchanged)
+        for i in range(num_roots):
+            if not masked_indices[i]:
+                continue
+
+            prob = torch.rand(1, device=input_ids.device).item()
+            if prob < 0.8:
+                masked_input_ids[batch_idx, i] = mask_token_id
+            elif prob < 0.9:
+                masked_input_ids[batch_idx, i] = torch.randint(0, vocab_size, (1,), device=input_ids.device).item()
+
+    return masked_input_ids, labels
+
+
+def create_leaf_only_mnm_labels(
+    input_ids: torch.Tensor,
+    token_type_ids: torch.Tensor,
+    mask_token_id: int,
+    vocab_size: int,
+    num_roots: int = 128,
+    leaves_per_root: int = 7,
+    mask_prob: float = 0.15,
+    special_token_ids: Optional[list] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Create MNM labels for fixed root-leaf structure: ONLY mask leaf positions (128-1023).
+
+    Paper structure: [128 roots | 896 leaves]
+    - When a leaf block is selected for masking, mask all 7 tokens in that block
+    - This matches the paper's semantic leaf masking strategy
+
+    Args:
+        input_ids: [batch_size, 1024] - full sequence
+        token_type_ids: [batch_size, 1024] - 0 for roots, 1 for leaves
+        mask_token_id: ID of [MASK] token
+        vocab_size: Vocabulary size
+        num_roots: Number of root positions (128)
+        leaves_per_root: Number of leaves per root (7)
+        mask_prob: Probability of masking leaves (default 0.15)
+        special_token_ids: List of special tokens to never mask
+
+    Returns:
+        masked_input_ids: [batch_size, 1024] - input with masked leaf blocks
+        labels: [batch_size, 1024] - original tokens (-100 for non-masked and roots)
+    """
+    labels = input_ids.clone()
+    masked_input_ids = input_ids.clone()
+    batch_size, seq_len = input_ids.shape
+
+    # Set all root positions to -100 (not part of MNM objective)
+    labels[:, :num_roots] = -100
+
+    # Identify leaf blocks (each root has a 7-token leaf block)
+    num_leaf_blocks = num_roots
+    leaf_start = num_roots
+
+    for batch_idx in range(batch_size):
+        # Select leaf blocks to mask
+        num_blocks_to_mask = int(mask_prob * num_leaf_blocks)
+
+        # Randomly select which leaf blocks to mask
+        all_block_indices = list(range(num_leaf_blocks))
+        masked_block_indices = torch.randperm(num_leaf_blocks, device=input_ids.device)[:num_blocks_to_mask].tolist()
+
+        # Mask selected leaf blocks
+        for block_idx in masked_block_indices:
+            # Calculate positions for this leaf block
+            block_start = leaf_start + block_idx * leaves_per_root
+            block_end = block_start + leaves_per_root
+
+            # Check if any tokens in this block are padding
+            block_tokens = input_ids[batch_idx, block_start:block_end]
+            is_padding = (block_tokens == 1) | (block_tokens == 0)  # PAD token IDs
+
+            # Mask all non-padding tokens in this leaf block
+            for i in range(block_start, block_end):
+                token_offset = i - block_start
+                if is_padding[token_offset]:
+                    labels[batch_idx, i] = -100  # Don't predict padding
+                    continue
+
+                # Apply masking strategy (80% [MASK], 10% random, 10% unchanged)
+                prob = torch.rand(1, device=input_ids.device).item()
+                if prob < 0.8:
+                    masked_input_ids[batch_idx, i] = mask_token_id
+                elif prob < 0.9:
+                    masked_input_ids[batch_idx, i] = torch.randint(0, vocab_size, (1,), device=input_ids.device).item()
+                # else: keep original
+
+        # Set non-masked leaf positions to -100
+        for i in range(leaf_start, seq_len):
+            block_idx = (i - leaf_start) // leaves_per_root
+            if block_idx not in masked_block_indices:
+                labels[batch_idx, i] = -100
+
+    return masked_input_ids, labels

@@ -74,27 +74,67 @@ class ChainGraphDataset(Dataset):
         return len(self.chain_graphs)
 
     def __getitem__(self, idx: int) -> Dict:
-        """Return a training example as a dictionary"""
+        """
+        Return a training example as a dictionary.
+
+        For 1024-token fixed root-leaf structure: [128 roots | 896 leaves]
+        """
         cg = self.chain_graphs[idx]
+
+        # Get structure parameters from metadata (with defaults)
+        num_roots = cg.metadata.get('num_roots', 128)
+        leaves_per_root = cg.metadata.get('leaves_per_root', 7)
+        seq_len = num_roots + num_roots * leaves_per_root  # 1024
 
         # Convert to tensors
         input_ids = torch.tensor(cg.input_ids, dtype=torch.long)
         attention_mask = torch.tensor(cg.attention_mask, dtype=torch.long)
 
-        # Prepare triple information
-        # Format: (head_pos, relation_id, tail_pos) for each triple
-        triple_data = []
+        # Create token_type_ids: 0 for roots, 1 for leaves
+        token_type_ids = torch.zeros(seq_len, dtype=torch.long)
+        token_type_ids[num_roots:] = 1  # Positions 128-1023 are leaves
+
+        # Build graph_structure [128, 7] and relation_ids [128, 7]
+        # graph_structure[i, j] = position of j-th leaf connected to root i
+        # relation_ids[i, j] = relation type for that connection
+        graph_structure = torch.full((num_roots, leaves_per_root), -1, dtype=torch.long)
+        relation_ids = torch.full((num_roots, leaves_per_root), -1, dtype=torch.long)
+
+        # Map from root positions to their connected triples
+        root_to_triples = {}
         for triple in cg.triples:
-            # Use first position if multiple positions exist
-            head_pos = triple.head_pos[0] if triple.head_pos else -1
-            tail_pos = triple.tail_pos[0] if triple.tail_pos else -1
-            triple_data.append((head_pos, triple.relation_id, tail_pos))
+            # Get root position (head_pos should be in range 0-127)
+            if triple.head_pos:
+                for head_pos in triple.head_pos:
+                    if head_pos < num_roots:  # Only consider root positions
+                        if head_pos not in root_to_triples:
+                            root_to_triples[head_pos] = []
+                        root_to_triples[head_pos].append(triple)
+
+        # Fill graph_structure and relation_ids
+        for root_idx in range(num_roots):
+            if root_idx not in root_to_triples:
+                continue
+
+            triples_for_root = root_to_triples[root_idx][:leaves_per_root]  # Max 7
+
+            for leaf_slot, triple in enumerate(triples_for_root):
+                # The tail_pos should be in leaf range (128-1023)
+                if triple.tail_pos and len(triple.tail_pos) > 0:
+                    # Use first tail position
+                    tail_pos = triple.tail_pos[0]
+
+                    # Verify it's in leaf range
+                    if tail_pos >= num_roots and tail_pos < seq_len:
+                        graph_structure[root_idx, leaf_slot] = tail_pos
+                        relation_ids[root_idx, leaf_slot] = triple.relation_id
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "triples": triple_data,  # List of (head_pos, rel_id, tail_pos)
-            "num_triples": len(triple_data),
+            "token_type_ids": token_type_ids,
+            "graph_structure": graph_structure,
+            "relation_ids": relation_ids,
             "metadata": cg.metadata
         }
 

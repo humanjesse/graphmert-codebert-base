@@ -13,35 +13,40 @@ from typing import Optional, Tuple
 
 class HierarchicalGATEmbedding(nn.Module):
     """
-    H-GAT layer that fuses text embeddings with graph structure.
+    H-GAT layer that fuses root embeddings with leaf embeddings.
 
-    In a leafy chain graph:
-    - Root nodes: text tokens
-    - Leaf nodes: KG triples (head, relation, tail)
+    Paper's leafy chain graph structure: [128 roots | 896 leaves]
+    - Root nodes (0-127): Code tokens
+    - Leaf nodes (128-1023): Triple tail entity tokens
+    - Each root i connects to 7 leaves at positions [128 + i*7 : 128 + i*7 + 7]
 
     This layer uses graph attention to combine root embeddings with
-    relation embeddings from their connected leaves.
+    their connected leaf embeddings.
     """
 
     def __init__(
         self,
-        hidden_size: int = 512,
-        num_relations: int = 100,  # Will be updated based on KG
-        num_attention_heads: int = 8,
+        hidden_size: int = 768,
+        num_relations: int = 100,  # For relation type embeddings
+        num_attention_heads: int = 12,
         dropout: float = 0.1,
+        num_roots: int = 128,
+        leaves_per_root: int = 7
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_relations = num_relations
         self.num_attention_heads = num_attention_heads
         self.attention_head_size = hidden_size // num_attention_heads
+        self.num_roots = num_roots
+        self.leaves_per_root = leaves_per_root
 
-        # Relation embeddings (learned parameters)
+        # Relation type embeddings (used to augment leaf embeddings)
         self.relation_embeddings = nn.Embedding(num_relations, hidden_size)
 
         # Attention mechanism for graph fusion
-        # Query: from text tokens (roots)
-        # Key/Value: from relations (leaves)
+        # Query: from root tokens
+        # Key/Value: from leaf tokens (augmented with relation embeddings)
         self.query = nn.Linear(hidden_size, hidden_size)
         self.key = nn.Linear(hidden_size, hidden_size)
         self.value = nn.Linear(hidden_size, hidden_size)
@@ -61,58 +66,69 @@ class HierarchicalGATEmbedding(nn.Module):
 
     def forward(
         self,
-        text_embeddings: torch.Tensor,
+        embeddings: torch.Tensor,
         graph_structure: Optional[torch.Tensor] = None,
         relation_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
+        Fuse root embeddings with their connected leaf embeddings.
+
         Args:
-            text_embeddings: [batch_size, seq_len, hidden_size]
-                Base token embeddings (roots of leafy chain graph)
-            graph_structure: [batch_size, seq_len, max_leaves]
-                For each token, indices of connected leaf nodes (KG triples)
+            embeddings: [batch_size, 1024, hidden_size]
+                Full sequence embeddings: [128 roots | 896 leaves]
+            graph_structure: [batch_size, 128, 7]
+                For each root, the positions of its 7 connected leaves
                 -1 indicates no connection
-            relation_ids: [batch_size, seq_len, max_leaves]
-                Relation type IDs for each connected leaf
+            relation_ids: [batch_size, 128, 7]
+                Relation type IDs for each root-leaf connection
 
         Returns:
-            fused_embeddings: [batch_size, seq_len, hidden_size]
-                Text embeddings enhanced with graph structure
+            fused_embeddings: [batch_size, 1024, hidden_size]
+                Embeddings with root-leaf fusion applied
         """
-        batch_size, seq_len, hidden_size = text_embeddings.size()
+        batch_size, seq_len, hidden_size = embeddings.size()
 
         # If no graph structure provided, return original embeddings
         if graph_structure is None or relation_ids is None:
-            return text_embeddings
+            return embeddings
 
-        max_leaves = relation_ids.size(2)
+        # Split embeddings into roots and leaves
+        root_embeddings = embeddings[:, :self.num_roots, :]  # [B, 128, H]
+        leaf_embeddings = embeddings[:, self.num_roots:, :]  # [B, 896, H]
 
-        # Get relation embeddings for all connected leaves
-        # relation_ids: [B, L, max_leaves]
-        relation_embeds = self.relation_embeddings(relation_ids.clamp(min=0))  # [B, L, max_leaves, H]
+        # Reshape leaf embeddings: [B, 896, H] → [B, 128, 7, H]
+        # Each root i has 7 leaves: positions [i*7 : i*7+7] in leaf_embeddings
+        leaf_embeddings_reshaped = leaf_embeddings.reshape(batch_size, self.num_roots, self.leaves_per_root, hidden_size)
 
-        # CRITICAL FIX: Process each token independently to prevent cross-token attention leakage
-        # Reshape text_embeddings: [B, L, H] → [B*L, 1, H]
-        # Reshape relation_embeds: [B, L, max_leaves, H] → [B*L, max_leaves, H]
-        text_flat = text_embeddings.view(batch_size * seq_len, 1, hidden_size)
-        relation_flat = relation_embeds.view(batch_size * seq_len, max_leaves, hidden_size)
+        # Get relation embeddings and add to leaf embeddings
+        # relation_ids: [B, 128, 7]
+        relation_embeds = self.relation_embeddings(relation_ids.clamp(min=0, max=self.num_relations-1))  # [B, 128, 7, H]
 
-        # Compute queries from text tokens: [B*L, 1, H] → [B*L, N, 1, H/N]
-        query_layer = self.transpose_for_scores(self.query(text_flat))  # [B*L, N, 1, H/N]
+        # Augment leaf embeddings with relation information
+        augmented_leaves = leaf_embeddings_reshaped + relation_embeds  # [B, 128, 7, H]
 
-        # Compute keys and values from relations: [B*L, max_leaves, H] → [B*L, N, max_leaves, H/N]
-        key_layer = self.transpose_for_scores(self.key(relation_flat))  # [B*L, N, max_leaves, H/N]
-        value_layer = self.transpose_for_scores(self.value(relation_flat))  # [B*L, N, max_leaves, H/N]
+        # For each root, attend to its 7 augmented leaves
+        # Process per-root to ensure each root only attends to its own leaves
+        # Reshape: [B, 128, 7, H] → [B*128, 7, H]
+        augmented_leaves_flat = augmented_leaves.reshape(batch_size * self.num_roots, self.leaves_per_root, hidden_size)
+        root_embeddings_flat = root_embeddings.reshape(batch_size * self.num_roots, 1, hidden_size)
 
-        # Attention scores: [B*L, N, 1, H/N] @ [B*L, N, H/N, max_leaves] → [B*L, N, 1, max_leaves]
+        # Compute queries from roots: [B*128, 1, H]
+        query_layer = self.transpose_for_scores(self.query(root_embeddings_flat))  # [B*128, N, 1, H/N]
+
+        # Compute keys and values from augmented leaves: [B*128, 7, H]
+        key_layer = self.transpose_for_scores(self.key(augmented_leaves_flat))  # [B*128, N, 7, H/N]
+        value_layer = self.transpose_for_scores(self.value(augmented_leaves_flat))  # [B*128, N, 7, H/N]
+
+        # Attention scores: [B*128, N, 1, H/N] @ [B*128, N, H/N, 7] → [B*128, N, 1, 7]
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / (self.attention_head_size ** 0.5)
 
         # Create attention mask: only attend to connected leaves
-        # graph_structure: [B, L, max_leaves] → [B*L, max_leaves]
-        attention_mask = (graph_structure.view(batch_size * seq_len, max_leaves) != -1).float()
-        # Expand for heads and query dimension: [B*L, max_leaves] → [B*L, 1, 1, max_leaves]
-        attention_mask = attention_mask.view(batch_size * seq_len, 1, 1, max_leaves)
+        # graph_structure: [B, 128, 7] → [B*128, 7]
+        attention_mask = (graph_structure.reshape(batch_size * self.num_roots, self.leaves_per_root) != -1).float()
+        # Expand for heads and query dimension: [B*128, 7] → [B*128, 1, 1, 7]
+        attention_mask = attention_mask.reshape(batch_size * self.num_roots, 1, 1, self.leaves_per_root)
         attention_mask = attention_mask.expand(-1, self.num_attention_heads, -1, -1)
 
         # Apply mask (set disconnected positions to -inf before softmax)
@@ -122,19 +138,22 @@ class HierarchicalGATEmbedding(nn.Module):
         attention_probs = F.softmax(attention_scores, dim=-1)
         attention_probs = self.dropout(attention_probs)
 
-        # Apply attention to values: [B*L, N, 1, max_leaves] @ [B*L, N, max_leaves, H/N] → [B*L, N, 1, H/N]
-        context_layer = torch.matmul(attention_probs, value_layer)  # [B*L, N, 1, H/N]
+        # Apply attention to values: [B*128, N, 1, 7] @ [B*128, N, 7, H/N] → [B*128, N, 1, H/N]
+        context_layer = torch.matmul(attention_probs, value_layer)  # [B*128, N, 1, H/N]
 
-        # Reshape back: [B*L, N, 1, H/N] → [B*L, 1, N, H/N] → [B*L, 1, H]
+        # Reshape back: [B*128, N, 1, H/N] → [B*128, 1, N, H/N] → [B*128, 1, H]
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        context_layer = context_layer.view(batch_size * seq_len, 1, hidden_size)
+        context_layer = context_layer.reshape(batch_size * self.num_roots, 1, hidden_size)
 
-        # Remove the singular dimension and reshape back to [B, L, H]
-        context_layer = context_layer.squeeze(1).view(batch_size, seq_len, hidden_size)
+        # Remove singular dimension and reshape: [B*128, 1, H] → [B, 128, H]
+        context_layer = context_layer.squeeze(1).reshape(batch_size, self.num_roots, hidden_size)
 
         # Output projection and residual connection
         output = self.output_dense(context_layer)
         output = self.output_dropout(output)
-        output = self.layer_norm(text_embeddings + output)
+        fused_roots = self.layer_norm(root_embeddings + output)  # [B, 128, H]
 
-        return output
+        # Concatenate fused roots with original leaves
+        fused_embeddings = torch.cat([fused_roots, leaf_embeddings], dim=1)  # [B, 1024, H]
+
+        return fused_embeddings
