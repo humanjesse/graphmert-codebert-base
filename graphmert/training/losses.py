@@ -710,3 +710,41 @@ def create_leaf_only_mnm_labels(
                 labels[batch_idx, i] = -100
 
     return masked_input_ids, labels
+
+
+def compute_mlm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """
+    Compute MLM loss given logits and labels.
+
+    Args:
+        logits: [batch_size, seq_len, vocab_size]
+        labels: [batch_size, seq_len] with -100 for non-masked positions
+
+    Returns:
+        loss: scalar tensor
+    """
+    loss_fct = nn.CrossEntropyLoss()
+    # Flatten
+    logits_flat = logits.view(-1, logits.size(-1))
+    labels_flat = labels.view(-1)
+    loss = loss_fct(logits_flat, labels_flat)
+    return loss
+
+
+def compute_mnm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """
+    Compute MNM loss given logits and labels.
+
+    Args:
+        logits: [batch_size, seq_len, vocab_size]
+        labels: [batch_size, seq_len] with -100 for non-masked positions
+
+    Returns:
+        loss: scalar tensor
+    """
+    loss_fct = nn.CrossEntropyLoss()
+    # Flatten
+    logits_flat = logits.view(-1, logits.size(-1))
+    labels_flat = labels.view(-1)
+    loss = loss_fct(logits_flat, labels_flat)
+    return loss
