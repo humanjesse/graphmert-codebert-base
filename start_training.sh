@@ -93,7 +93,7 @@ TRAIN_CMD="source venv/bin/activate && python train_cloud.py \
     --learning_rate $LEARNING_RATE \
     --lambda_mlm $LAMBDA_MLM \
     --num_relations $NUM_RELATIONS \
-    --checkpoint_every 5"
+    --checkpoint_every 1"
 
 if [ "$USE_WANDB" = true ]; then
     TRAIN_CMD="$TRAIN_CMD --use_wandb --wandb_project $WANDB_PROJECT"

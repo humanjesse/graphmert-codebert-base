@@ -108,6 +108,99 @@ def compute_graph_distances(
     return distances
 
 
+def compute_graph_distances_with_floyd_warshall(
+    graph_structure: torch.Tensor,
+    num_roots: int = 128,
+    leaves_per_root: int = 7,
+    max_distance: float = 100.0
+) -> torch.Tensor:
+    """
+    Compute graph distances WITH Floyd-Warshall enabled (for testing only).
+    
+    WARNING: This is O(n³) and should ONLY be used with small graphs (n < 50)
+    or for offline preprocessing. For production with n=1024, use 
+    compute_graph_distances() which has Floyd-Warshall disabled for performance.
+    
+    This function is identical to compute_graph_distances() but with the
+    Floyd-Warshall algorithm ENABLED for validation purposes.
+    
+    Args:
+        graph_structure: [batch_size, num_roots, leaves_per_root]
+        num_roots: Number of root positions (default 128)
+        leaves_per_root: Number of leaves per root (default 7)
+        max_distance: Maximum distance to compute (default 100)
+    
+    Returns:
+        distances: [batch_size, seq_len, seq_len]
+    """
+    batch_size = graph_structure.size(0)
+    device = graph_structure.device
+    seq_len = num_roots + num_roots * leaves_per_root
+    
+    # Initialize distance matrix
+    distances = torch.full(
+        (batch_size, seq_len, seq_len),
+        fill_value=float('inf'),
+        device=device,
+        dtype=torch.float32
+    )
+    
+    # Distance to self is 0
+    for i in range(seq_len):
+        distances[:, i, i] = 0.0
+    
+    # Build adjacency based on fixed root-leaf structure
+    for batch_idx in range(batch_size):
+        # For each root
+        for root_idx in range(num_roots):
+            # Get connected leaf positions for this root
+            leaf_positions = graph_structure[batch_idx, root_idx]
+            valid_leaves = leaf_positions[leaf_positions != -1]
+            
+            if len(valid_leaves) == 0:
+                continue
+            
+            # Distance from root to its connected leaves is 1
+            for leaf_pos in valid_leaves:
+                leaf_pos = leaf_pos.item()
+                distances[batch_idx, root_idx, leaf_pos] = 1.0
+                distances[batch_idx, leaf_pos, root_idx] = 1.0
+        
+        # Compute root-to-root distances via shared leaves
+        for root_i in range(num_roots):
+            leaves_i = graph_structure[batch_idx, root_i]
+            valid_leaves_i = leaves_i[leaves_i != -1]
+            
+            if len(valid_leaves_i) == 0:
+                continue
+            
+            for root_j in range(root_i + 1, num_roots):
+                leaves_j = graph_structure[batch_idx, root_j]
+                valid_leaves_j = leaves_j[leaves_j != -1]
+                
+                if len(valid_leaves_j) == 0:
+                    continue
+                
+                # Check if roots share any leaves
+                for leaf_i in valid_leaves_i:
+                    if (leaf_i.unsqueeze(0) == valid_leaves_j).any():
+                        distances[batch_idx, root_i, root_j] = 2.0
+                        distances[batch_idx, root_j, root_i] = 2.0
+                        break
+    
+    # Floyd-Warshall for multi-hop paths - ENABLED FOR TESTING
+    # Paper (line 1087): "Floyd-Warshall algorithm"
+    for batch_idx in range(batch_size):
+        for k in range(seq_len):
+            for i in range(seq_len):
+                for j in range(seq_len):
+                    new_dist = distances[batch_idx, i, k] + distances[batch_idx, k, j]
+                    if new_dist < distances[batch_idx, i, j]:
+                        distances[batch_idx, i, j] = new_dist
+    
+    return distances
+
+
 def create_leafy_chain_attention_mask(
     graph_structure: Optional[torch.Tensor],
     seq_len: int,

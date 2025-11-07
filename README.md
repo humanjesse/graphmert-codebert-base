@@ -3,9 +3,10 @@
 [![Status](https://img.shields.io/badge/status-architecture--only-yellow)]()
 [![License](https://img.shields.io/badge/license-MIT-blue)]()
 [![Python](https://img.shields.io/badge/python-3.8+-green)]()
-[![Tests](https://img.shields.io/badge/tests-10%20comprehensive-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-11%20comprehensive-brightgreen)]()
+[![Paper](https://img.shields.io/badge/paper-aligned-blue)]()
 
-> **Note**: This repository contains the complete architecture implementation with comprehensive test suite.
+> **Note**: This repository contains the complete architecture implementation with comprehensive test suite aligned with paper specifications.
 > Trained model weights are not included - users should train on their own datasets.
 
 A knowledge-graph-enhanced transformer for code understanding, based on the GraphMERT architecture.
@@ -72,7 +73,7 @@ source venv/bin/activate  # Linux/Mac (Windows: venv\Scripts\activate)
 # Install dependencies
 pip install -r requirements.txt
 
-# Run comprehensive test suite (validates all 10 critical components)
+# Run comprehensive test suite (validates all 11 components against paper)
 python test_fixes.py
 ```
 
