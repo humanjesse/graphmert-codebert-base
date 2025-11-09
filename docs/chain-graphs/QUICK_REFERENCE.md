@@ -175,9 +175,9 @@ Relation distribution:
 
 ## Documentation Files
 
-- `CHAIN_GRAPH_IMPROVEMENTS.md` - Full technical documentation
+- `archive/CHAIN_GRAPH_IMPROVEMENTS.md` - Full technical documentation
 - `USAGE_EXAMPLES.md` - Detailed usage examples
-- `IMPLEMENTATION_SUMMARY.md` - Task completion summary
+- `archive/IMPLEMENTATION_SUMMARY.md` - Task completion summary
 - `QUICK_REFERENCE.md` - This file
 
 ## Backward Compatibility

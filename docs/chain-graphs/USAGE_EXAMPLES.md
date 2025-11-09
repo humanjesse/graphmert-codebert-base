@@ -360,6 +360,6 @@ OOM error when building dataset.
 
 ## Additional Resources
 
-- Full documentation: `CHAIN_GRAPH_IMPROVEMENTS.md`
+- Full documentation: `archive/CHAIN_GRAPH_IMPROVEMENTS.md`
 - Test suite: `test_chain_graph_improvements.py`
 - Source code: `scripts/build_chain_graphs.py`
