@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
+from torch.cuda.amp import autocast, GradScaler
 from transformers import RobertaTokenizerFast, get_cosine_schedule_with_warmup
 from tqdm import tqdm
 import os
@@ -122,6 +123,15 @@ class GraphMERTTrainerCloud:
         self.lm_head = nn.Linear(model.config.hidden_size, tokenizer.vocab_size, bias=False)
         self.lm_head = self.lm_head.to(device)
 
+        # Mixed precision training (BF16/AMP)
+        self.use_amp = device.type == 'cuda'  # Only use AMP on GPU
+        if self.use_amp:
+            self.scaler = GradScaler()
+            print("✓ Mixed precision (BF16/AMP) enabled")
+        else:
+            self.scaler = None
+            print("ℹ Mixed precision disabled (CPU mode)")
+
         # Training state
         self.global_step = 0
         self.start_epoch = 0
@@ -141,6 +151,10 @@ class GraphMERTTrainerCloud:
             'metrics': metrics,
             'best_val_loss': self.best_val_loss,
         }
+
+        # Save scaler state if using mixed precision
+        if self.use_amp and self.scaler is not None:
+            checkpoint['scaler_state_dict'] = self.scaler.state_dict()
 
         torch.save(checkpoint, checkpoint_path)
         print(f"✓ Saved checkpoint to {checkpoint_path}")
@@ -164,6 +178,10 @@ class GraphMERTTrainerCloud:
         self.lm_head.load_state_dict(checkpoint['lm_head_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # Load scaler state if using mixed precision
+        if self.use_amp and self.scaler is not None and 'scaler_state_dict' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
         self.start_epoch = checkpoint['epoch'] + 1
         self.global_step = checkpoint['global_step']
@@ -190,77 +208,92 @@ class GraphMERTTrainerCloud:
             # Move to device
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
-            # === MLM Loss (Root tokens only) ===
-            masked_input_ids_mlm, mlm_labels = create_root_only_mlm_labels(
-                batch['input_ids'],
-                mask_token_id=self.tokenizer.mask_token_id,
-                vocab_size=self.tokenizer.vocab_size,
-                num_roots=128
-            )
+            # Forward pass with mixed precision (BF16/AMP)
+            with autocast(enabled=self.use_amp):
+                # === MLM Loss (Root tokens only) ===
+                masked_input_ids_mlm, mlm_labels = create_root_only_mlm_labels(
+                    batch['input_ids'],
+                    mask_token_id=self.tokenizer.mask_token_id,
+                    vocab_size=self.tokenizer.vocab_size,
+                    num_roots=128
+                )
 
-            # Forward pass for MLM
-            outputs_mlm = self.model(
-                input_ids=masked_input_ids_mlm,
-                attention_mask=batch['attention_mask'],
-                token_type_ids=batch['token_type_ids'],
-                graph_structure=batch['graph_structure'],
-                relation_ids=batch['relation_ids'],
-            )
+                # Forward pass for MLM
+                outputs_mlm = self.model(
+                    input_ids=masked_input_ids_mlm,
+                    attention_mask=batch['attention_mask'],
+                    token_type_ids=batch['token_type_ids'],
+                    graph_structure=batch['graph_structure'],
+                    relation_ids=batch['relation_ids'],
+                )
 
-            # Compute MLM loss
-            logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
-            mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
+                # Compute MLM loss
+                logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
+                mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
 
-            # === MNM Loss (Relation Prediction) ===
-            # Mask relations and create labels
-            masked_relation_ids, relation_labels = create_relation_masking_labels(
-                batch['relation_ids'],
-                batch['graph_structure'],
-                mask_prob=0.15,
-                mask_value=-1,
-                num_relations=self.model.config.num_relations
-            )
+                # === MNM Loss (Relation Prediction) ===
+                # Mask relations and create labels
+                masked_relation_ids, relation_labels = create_relation_masking_labels(
+                    batch['relation_ids'],
+                    batch['graph_structure'],
+                    mask_prob=0.15,
+                    mask_value=-1,
+                    num_relations=self.model.config.num_relations
+                )
 
-            # Forward pass with masked relations
-            outputs_mnm = self.model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                token_type_ids=batch['token_type_ids'],
-                graph_structure=batch['graph_structure'],
-                relation_ids=masked_relation_ids,  # Use masked relations
-            )
+                # Forward pass with masked relations
+                outputs_mnm = self.model(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    token_type_ids=batch['token_type_ids'],
+                    graph_structure=batch['graph_structure'],
+                    relation_ids=masked_relation_ids,  # Use masked relations
+                )
 
-            # Get root embeddings for relation prediction
-            # relation_logits: [batch_size, 128, 7, num_relations]
-            root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
+                # Get root embeddings for relation prediction
+                # relation_logits: [batch_size, 128, 7, num_relations]
+                root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
 
-            # For each root, predict relations for its 7 leaf connections
-            # We'll extract embeddings and predict relations
-            batch_size, num_roots = root_embeddings.shape[0], 128
-            leaves_per_root = 7
+                # For each root, predict relations for its 7 leaf connections
+                # We'll extract embeddings and predict relations
+                batch_size, num_roots = root_embeddings.shape[0], 128
+                leaves_per_root = 7
 
-            # Use relation head to predict relation types from root embeddings
-            # Expand root embeddings to match [B, 128, 7] structure
-            root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
-            relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
+                # Use relation head to predict relation types from root embeddings
+                # Expand root embeddings to match [B, 128, 7] structure
+                root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
+                relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
 
-            # Compute relation prediction loss
-            mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
+                # Compute relation prediction loss
+                mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
 
-            # === Combined Loss ===
-            loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
+                # === Combined Loss ===
+                loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
 
             # Backward pass with gradient accumulation
             loss = loss / self.gradient_accumulation_steps
-            loss.backward()
+
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             # Optimizer step
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                if self.use_amp:
+                    # Unscale before gradient clipping
+                    self.scaler.unscale_(self.optimizer)
+
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(self.lm_head.parameters(), max_norm=1.0)
                 # Note: relation_head is part of model.parameters(), but keeping explicit for clarity
 
-                self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+
                 self.scheduler.step()
                 self.optimizer.zero_grad()
                 self.global_step += 1
@@ -317,52 +350,53 @@ class GraphMERTTrainerCloud:
         for batch in tqdm(self.val_loader, desc="Validation"):
             batch = {k: v.to(self.device) for k, v in batch.items()}
 
-            # MLM Loss
-            masked_input_ids_mlm, mlm_labels = create_root_only_mlm_labels(
-                batch['input_ids'],
-                mask_token_id=self.tokenizer.mask_token_id,
-                vocab_size=self.tokenizer.vocab_size,
-                num_roots=128
-            )
+            with autocast(enabled=self.use_amp):
+                # MLM Loss
+                masked_input_ids_mlm, mlm_labels = create_root_only_mlm_labels(
+                    batch['input_ids'],
+                    mask_token_id=self.tokenizer.mask_token_id,
+                    vocab_size=self.tokenizer.vocab_size,
+                    num_roots=128
+                )
 
-            outputs_mlm = self.model(
-                input_ids=masked_input_ids_mlm,
-                attention_mask=batch['attention_mask'],
-                token_type_ids=batch['token_type_ids'],
-                graph_structure=batch['graph_structure'],
-                relation_ids=batch['relation_ids'],
-            )
+                outputs_mlm = self.model(
+                    input_ids=masked_input_ids_mlm,
+                    attention_mask=batch['attention_mask'],
+                    token_type_ids=batch['token_type_ids'],
+                    graph_structure=batch['graph_structure'],
+                    relation_ids=batch['relation_ids'],
+                )
 
-            logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
-            mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
+                logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
+                mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
 
-            # MNM Loss (Relation Prediction)
-            masked_relation_ids, relation_labels = create_relation_masking_labels(
-                batch['relation_ids'],
-                batch['graph_structure'],
-                mask_prob=0.15,
-                mask_value=-1,
-                num_relations=self.model.config.num_relations
-            )
+                # MNM Loss (Relation Prediction)
+                masked_relation_ids, relation_labels = create_relation_masking_labels(
+                    batch['relation_ids'],
+                    batch['graph_structure'],
+                    mask_prob=0.15,
+                    mask_value=-1,
+                    num_relations=self.model.config.num_relations
+                )
 
-            outputs_mnm = self.model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                token_type_ids=batch['token_type_ids'],
-                graph_structure=batch['graph_structure'],
-                relation_ids=masked_relation_ids,
-            )
+                outputs_mnm = self.model(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    token_type_ids=batch['token_type_ids'],
+                    graph_structure=batch['graph_structure'],
+                    relation_ids=masked_relation_ids,
+                )
 
-            # Get root embeddings for relation prediction
-            root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
-            leaves_per_root = 7
-            root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
-            relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
+                # Get root embeddings for relation prediction
+                root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
+                leaves_per_root = 7
+                root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
+                relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
 
-            mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
+                mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
 
-            # Combined loss
-            loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
+                # Combined loss
+                loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
 
             total_loss += loss.item()
             total_mlm_loss += mlm_loss.item()
@@ -540,12 +574,13 @@ def main():
         weight_decay=args.weight_decay
     )
 
-    total_steps = len(train_loader) * args.num_epochs
-    warmup_steps = int(total_steps * args.warmup_ratio)
+    # Account for gradient accumulation: optimizer steps = batches / accumulation_steps
+    total_optimizer_steps = (len(train_loader) * args.num_epochs) // args.gradient_accumulation_steps
+    warmup_steps = int(total_optimizer_steps * args.warmup_ratio)
     temp_scheduler = get_cosine_schedule_with_warmup(
         temp_optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+        num_training_steps=total_optimizer_steps
     )
 
     # Initialize trainer (creates lm_head)
@@ -578,7 +613,7 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+        num_training_steps=total_optimizer_steps
     )
 
     # Replace trainer's optimizer and scheduler
@@ -587,7 +622,7 @@ def main():
 
     print(f"✓ AdamW optimizer (lr={args.learning_rate}, wd={args.weight_decay})")
     print(f"✓ Optimizer params: {len(list(model.parameters()))} (model) + {len(list(trainer.lm_head.parameters()))} (lm_head)")
-    print(f"✓ Cosine schedule (warmup={warmup_steps}, total={total_steps})")
+    print(f"✓ Cosine schedule (warmup={warmup_steps}, total_optimizer_steps={total_optimizer_steps}, effective_epochs={args.num_epochs})")
 
     # Resume if requested
     if args.resume:

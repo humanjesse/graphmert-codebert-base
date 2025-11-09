@@ -272,11 +272,9 @@ def create_leafy_chain_attention_mask(
     # Subtract offset: √(distance) - p
     adjusted_distances = sqrt_distances - distance_offset
 
-    # Clamp to prevent negative values (paper text says "GELU zeroes the exponent" for distance ≤ p)
-    # This implements: GELU(max(0, √(distance) - p))
-    adjusted_distances = torch.clamp(adjusted_distances, min=0.0)
-
-    # Apply GELU activation
+    # Apply GELU activation (handles negative inputs naturally)
+    # For close nodes (√distance < p), GELU produces small positive values
+    # This gives mask values slightly >1 for very close connections, <1 for distant ones
     gelu_distances = F.gelu(adjusted_distances)
 
     # Apply exponential decay: weight = decay_rate ^ GELU(√(distance) - p)

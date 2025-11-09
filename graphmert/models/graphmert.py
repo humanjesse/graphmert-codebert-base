@@ -30,7 +30,7 @@ class GraphMERTConfig(RobertaConfig):
 
     def __init__(
         self,
-        num_relations: int = 100,
+        num_relations: int = 12,  # Paper uses 12 relation types for code graphs
         use_h_gat: bool = True,
         use_decay_mask: bool = True,
         attention_decay_rate: float = 0.6,  # λ = 0.6 from paper Section 2.7.2, Equation 8
@@ -42,6 +42,14 @@ class GraphMERTConfig(RobertaConfig):
         kwargs['max_position_embeddings'] = max_position_embeddings
         kwargs['type_vocab_size'] = 2  # Need 2 types: 0=root, 1=leaf (RoBERTa default is 1)
         super().__init__(**kwargs)
+
+        # Validate dimensions for multi-head attention
+        if self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError(
+                f"hidden_size ({self.hidden_size}) must be divisible by "
+                f"num_attention_heads ({self.num_attention_heads})"
+            )
+
         self.num_relations = num_relations
         self.use_h_gat = use_h_gat
         self.use_decay_mask = use_decay_mask
