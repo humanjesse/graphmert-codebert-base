@@ -53,3 +53,6 @@ scripts/
 # Archive folders
 archive*/
 archive_old_*/
+
+# External dependencies (use git submodules instead)
+external/
