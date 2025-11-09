@@ -748,3 +748,94 @@ def compute_mnm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     labels_flat = labels.view(-1)
     loss = loss_fct(logits_flat, labels_flat)
     return loss
+
+
+def create_relation_masking_labels(
+    relation_ids: torch.Tensor,
+    graph_structure: torch.Tensor,
+    mask_prob: float = 0.15,
+    mask_value: int = -1,
+    num_relations: int = 12
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Create relation prediction labels by masking relations in graph_structure.
+
+    This implements the TRUE MNM objective: predicting masked RELATION TYPES,
+    not masked leaf tokens. This is the correct interpretation of the paper.
+
+    Args:
+        relation_ids: [batch_size, num_roots, leaves_per_root] - relation type IDs
+        graph_structure: [batch_size, num_roots, leaves_per_root] - leaf positions
+        mask_prob: Probability of masking a relation (default 0.15)
+        mask_value: Value to use for masked relations (default -1)
+        num_relations: Total number of relation types (default 12)
+
+    Returns:
+        masked_relation_ids: [batch_size, num_roots, leaves_per_root] - masked relations
+        labels: [batch_size, num_roots, leaves_per_root] - original relations (-100 for non-masked)
+    """
+    batch_size, num_roots, leaves_per_root = relation_ids.shape
+
+    # Clone tensors
+    masked_relation_ids = relation_ids.clone()
+    labels = torch.full_like(relation_ids, -100)  # -100 = ignore in loss
+
+    for batch_idx in range(batch_size):
+        for root_idx in range(num_roots):
+            for leaf_slot in range(leaves_per_root):
+                # Get the relation and graph connection
+                relation_id = relation_ids[batch_idx, root_idx, leaf_slot].item()
+                leaf_pos = graph_structure[batch_idx, root_idx, leaf_slot].item()
+
+                # Skip if no valid connection (graph_structure == -1)
+                if leaf_pos == -1 or relation_id == -1:
+                    continue
+
+                # Randomly mask this relation with mask_prob
+                if torch.rand(1).item() < mask_prob:
+                    # Apply masking strategy:
+                    # 80% mask to -1, 10% random relation, 10% unchanged
+                    prob = torch.rand(1).item()
+                    if prob < 0.8:
+                        masked_relation_ids[batch_idx, root_idx, leaf_slot] = mask_value
+                    elif prob < 0.9:
+                        # Random relation ID
+                        random_rel = torch.randint(0, num_relations, (1,)).item()
+                        masked_relation_ids[batch_idx, root_idx, leaf_slot] = random_rel
+                    # else: keep original (10%)
+
+                    # Save the original relation as label
+                    labels[batch_idx, root_idx, leaf_slot] = relation_id
+
+    return masked_relation_ids, labels
+
+
+def compute_relation_prediction_loss(
+    relation_logits: torch.Tensor,
+    relation_labels: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute relation prediction loss (TRUE MNM objective).
+
+    Predicts masked relation types from graph-aware embeddings.
+    This is a num_relations-way classification (typically 12 classes).
+
+    Args:
+        relation_logits: [batch_size, num_roots, leaves_per_root, num_relations]
+                        Predicted relation scores from relation prediction head
+        relation_labels: [batch_size, num_roots, leaves_per_root]
+                        Ground truth relation IDs (-100 for non-masked)
+
+    Returns:
+        loss: scalar tensor - cross-entropy loss over relation predictions
+    """
+    loss_fct = nn.CrossEntropyLoss()  # Automatically ignores -100 labels
+
+    # Flatten for cross-entropy
+    # logits: [batch * num_roots * leaves_per_root, num_relations]
+    # labels: [batch * num_roots * leaves_per_root]
+    logits_flat = relation_logits.view(-1, relation_logits.size(-1))
+    labels_flat = relation_labels.view(-1)
+
+    loss = loss_fct(logits_flat, labels_flat)
+    return loss

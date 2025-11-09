@@ -259,7 +259,8 @@ def create_leafy_chain_attention_mask(
         distance_offset = torch.tensor(distance_offset, device=distances.device, dtype=distances.dtype)
     else:
         # Ensure distance_offset is on the same device as distances
-        distance_offset = distance_offset.to(distances.device)
+        # Use to() which preserves requires_grad for gradient flow
+        distance_offset = distance_offset.to(device=distances.device, dtype=distances.dtype)
 
     # Apply sqrt first (only to finite distances)
     sqrt_distances = torch.where(

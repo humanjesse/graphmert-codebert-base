@@ -30,6 +30,7 @@ class HierarchicalGATEmbedding(nn.Module):
         num_relations: int = 100,  # For relation type embeddings
         num_attention_heads: int = 12,
         dropout: float = 0.1,
+        relation_dropout: float = 0.3,  # Paper: "relation embedding dropout of 0.3"
         num_roots: int = 128,
         leaves_per_root: int = 7
     ):
@@ -43,6 +44,7 @@ class HierarchicalGATEmbedding(nn.Module):
 
         # Relation type embeddings (used to augment leaf embeddings)
         self.relation_embeddings = nn.Embedding(num_relations, hidden_size)
+        self.relation_dropout = nn.Dropout(relation_dropout)
 
         # Attention mechanism for graph fusion
         # Query: from root tokens
@@ -102,7 +104,23 @@ class HierarchicalGATEmbedding(nn.Module):
 
         # Get relation embeddings and add to leaf embeddings
         # relation_ids: [B, 128, 7]
-        relation_embeds = self.relation_embeddings(relation_ids.clamp(min=0, max=self.num_relations-1))  # [B, 128, 7, H]
+        # Handle -1 (no connection) separately from valid relation IDs
+
+        # Create mask for valid relations (not -1)
+        valid_mask = (relation_ids != -1)  # [B, 128, 7]
+
+        # Clamp only valid indices, keep -1 as 0 temporarily for safe indexing
+        relation_ids_safe = torch.where(valid_mask, relation_ids, torch.zeros_like(relation_ids))
+        relation_ids_safe = relation_ids_safe.clamp(min=0, max=self.num_relations-1)
+
+        # Get embeddings (will get embedding for index 0 for invalid connections)
+        relation_embeds = self.relation_embeddings(relation_ids_safe)  # [B, 128, 7, H]
+        relation_embeds = self.relation_dropout(relation_embeds)  # Apply dropout to relation embeddings
+
+        # Zero out embeddings for invalid connections (-1)
+        # This ensures no-connection doesn't contribute to leaf augmentation
+        valid_mask_expanded = valid_mask.unsqueeze(-1)  # [B, 128, 7, 1]
+        relation_embeds = relation_embeds * valid_mask_expanded.float()  # [B, 128, 7, H]
 
         # Augment leaf embeddings with relation information
         augmented_leaves = leaf_embeddings_reshaped + relation_embeds  # [B, 128, 7, H]

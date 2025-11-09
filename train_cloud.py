@@ -38,7 +38,9 @@ from graphmert.training.losses import (
     create_root_only_mlm_labels,
     create_leaf_only_mnm_labels,
     compute_mlm_loss,
-    compute_mnm_loss
+    compute_mnm_loss,
+    create_relation_masking_labels,
+    compute_relation_prediction_loss
 )
 
 
@@ -209,28 +211,41 @@ class GraphMERTTrainerCloud:
             logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
             mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
 
-            # === MNM Loss (Leaf tokens only) ===
-            masked_input_ids_mnm, mnm_labels = create_leaf_only_mnm_labels(
-                batch['input_ids'],
-                batch['token_type_ids'],
-                mask_token_id=self.tokenizer.mask_token_id,
-                vocab_size=self.tokenizer.vocab_size,
-                num_roots=128,
-                leaves_per_root=7
+            # === MNM Loss (Relation Prediction) ===
+            # Mask relations and create labels
+            masked_relation_ids, relation_labels = create_relation_masking_labels(
+                batch['relation_ids'],
+                batch['graph_structure'],
+                mask_prob=0.15,
+                mask_value=-1,
+                num_relations=self.model.config.num_relations
             )
 
-            # Forward pass for MNM
+            # Forward pass with masked relations
             outputs_mnm = self.model(
-                input_ids=masked_input_ids_mnm,
+                input_ids=batch['input_ids'],
                 attention_mask=batch['attention_mask'],
                 token_type_ids=batch['token_type_ids'],
                 graph_structure=batch['graph_structure'],
-                relation_ids=batch['relation_ids'],
+                relation_ids=masked_relation_ids,  # Use masked relations
             )
 
-            # Compute MNM loss
-            logits_mnm = self.lm_head(outputs_mnm.last_hidden_state)
-            mnm_loss = compute_mnm_loss(logits_mnm, mnm_labels)
+            # Get root embeddings for relation prediction
+            # relation_logits: [batch_size, 128, 7, num_relations]
+            root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
+
+            # For each root, predict relations for its 7 leaf connections
+            # We'll extract embeddings and predict relations
+            batch_size, num_roots = root_embeddings.shape[0], 128
+            leaves_per_root = 7
+
+            # Use relation head to predict relation types from root embeddings
+            # Expand root embeddings to match [B, 128, 7] structure
+            root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
+            relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
+
+            # Compute relation prediction loss
+            mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
 
             # === Combined Loss ===
             loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
@@ -243,6 +258,7 @@ class GraphMERTTrainerCloud:
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(self.lm_head.parameters(), max_norm=1.0)
+                # Note: relation_head is part of model.parameters(), but keeping explicit for clarity
 
                 self.optimizer.step()
                 self.scheduler.step()
@@ -320,26 +336,30 @@ class GraphMERTTrainerCloud:
             logits_mlm = self.lm_head(outputs_mlm.last_hidden_state)
             mlm_loss = compute_mlm_loss(logits_mlm, mlm_labels)
 
-            # MNM Loss
-            masked_input_ids_mnm, mnm_labels = create_leaf_only_mnm_labels(
-                batch['input_ids'],
-                batch['token_type_ids'],
-                mask_token_id=self.tokenizer.mask_token_id,
-                vocab_size=self.tokenizer.vocab_size,
-                num_roots=128,
-                leaves_per_root=7
+            # MNM Loss (Relation Prediction)
+            masked_relation_ids, relation_labels = create_relation_masking_labels(
+                batch['relation_ids'],
+                batch['graph_structure'],
+                mask_prob=0.15,
+                mask_value=-1,
+                num_relations=self.model.config.num_relations
             )
 
             outputs_mnm = self.model(
-                input_ids=masked_input_ids_mnm,
+                input_ids=batch['input_ids'],
                 attention_mask=batch['attention_mask'],
                 token_type_ids=batch['token_type_ids'],
                 graph_structure=batch['graph_structure'],
-                relation_ids=batch['relation_ids'],
+                relation_ids=masked_relation_ids,
             )
 
-            logits_mnm = self.lm_head(outputs_mnm.last_hidden_state)
-            mnm_loss = compute_mnm_loss(logits_mnm, mnm_labels)
+            # Get root embeddings for relation prediction
+            root_embeddings = outputs_mnm.last_hidden_state[:, :128, :]  # [B, 128, H]
+            leaves_per_root = 7
+            root_embeds_expanded = root_embeddings.unsqueeze(2).expand(-1, -1, leaves_per_root, -1)  # [B, 128, 7, H]
+            relation_logits = self.model.relation_head(root_embeds_expanded)  # [B, 128, 7, num_relations]
+
+            mnm_loss = compute_relation_prediction_loss(relation_logits, relation_labels)
 
             # Combined loss
             loss = self.lambda_mlm * mlm_loss + self.lambda_mnm * mnm_loss
@@ -434,8 +454,8 @@ def main():
                         help="Warmup ratio (default: 0.1)")
     parser.add_argument("--lambda_mlm", type=float, default=0.6,
                         help="MLM loss weight (default: 0.6)")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
-                        help="Gradient accumulation steps")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
+                        help="Gradient accumulation steps (default: 2, from paper)")
     parser.add_argument("--checkpoint_every", type=int, default=5,
                         help="Save checkpoint every N epochs")
 
@@ -512,9 +532,9 @@ def main():
     model = model.to(args.device)
     print(f"✓ Model initialized: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters")
 
-    # Initialize optimizer and scheduler
+    # Initialize temporary optimizer for trainer setup (will be replaced)
     print("\n[4/5] Setting up optimizer and scheduler...")
-    optimizer = AdamW(
+    temp_optimizer = AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay
@@ -522,24 +542,21 @@ def main():
 
     total_steps = len(train_loader) * args.num_epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
+    temp_scheduler = get_cosine_schedule_with_warmup(
+        temp_optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps
     )
 
-    print(f"✓ AdamW optimizer (lr={args.learning_rate}, wd={args.weight_decay})")
-    print(f"✓ Cosine schedule (warmup={warmup_steps}, total={total_steps})")
-
-    # Initialize trainer
+    # Initialize trainer (creates lm_head)
     print("\n[5/5] Initializing trainer...")
     trainer = GraphMERTTrainerCloud(
         model=model,
         tokenizer=tokenizer,
         train_loader=train_loader,
         val_loader=val_loader,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        optimizer=temp_optimizer,
+        scheduler=temp_scheduler,
         device=args.device,
         output_dir=args.output_dir,
         num_epochs=args.num_epochs,
@@ -549,6 +566,28 @@ def main():
         wandb_project=args.wandb_project,
         checkpoint_every=args.checkpoint_every
     )
+
+    # Now create the REAL optimizer with both model and lm_head parameters
+    print("\n[*] Creating optimizer with model + lm_head parameters...")
+    optimizer = AdamW(
+        list(model.parameters()) + list(trainer.lm_head.parameters()),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
+
+    # Replace trainer's optimizer and scheduler
+    trainer.optimizer = optimizer
+    trainer.scheduler = scheduler
+
+    print(f"✓ AdamW optimizer (lr={args.learning_rate}, wd={args.weight_decay})")
+    print(f"✓ Optimizer params: {len(list(model.parameters()))} (model) + {len(list(trainer.lm_head.parameters()))} (lm_head)")
+    print(f"✓ Cosine schedule (warmup={warmup_steps}, total={total_steps})")
 
     # Resume if requested
     if args.resume:

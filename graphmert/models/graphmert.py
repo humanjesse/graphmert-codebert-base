@@ -68,7 +68,8 @@ class GraphMERTEmbeddings(nn.Module):
                 hidden_size=config.hidden_size,
                 num_relations=config.num_relations,
                 num_attention_heads=config.num_attention_heads,
-                dropout=config.hidden_dropout_prob
+                dropout=config.hidden_dropout_prob,
+                relation_dropout=0.3  # Paper: "relation embedding dropout of 0.3"
             )
         else:
             self.h_gat = None
@@ -158,6 +159,10 @@ class GraphMERTModel(RobertaPreTrainedModel):
         self.distance_offset = nn.Parameter(
             torch.tensor(config.distance_offset_init, dtype=torch.float32)
         )
+
+        # Relation prediction head for MNM (Masked Node Modeling)
+        # Predicts relation types (num_relations classes) instead of tokens
+        self.relation_head = nn.Linear(config.hidden_size, config.num_relations)
 
         self.post_init()
 
