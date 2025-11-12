@@ -17,8 +17,7 @@ A knowledge-graph-enhanced transformer for code understanding, based on the Grap
 Concepts adapted from this paper: https://arxiv.org/abs/2510.09580
 
 November 10th: Finished first successfull training run: https://wandb.ai/humanjesse-humanjesse/graphmert-codebert-initial-h100/
-  Working on sanity checks and initial evaluation to see if its work it gathering samples beyod python / gathering more training data.
-
+  Working on sanity checks and initial evaluation
 ## Key Features
 
 - **Leafy Chain Graphs**: Innovative data structure linking code tokens to knowledge graph triples
