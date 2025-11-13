@@ -1,363 +1,216 @@
 # GraphMERT for Code
 
-[![Status](https://img.shields.io/badge/status-architecture--only-yellow)]()
+[![Status](https://img.shields.io/badge/status-completed--learning--project-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-blue)]()
 [![Python](https://img.shields.io/badge/python-3.8+-green)]()
-[![Tests](https://img.shields.io/badge/tests-11%20comprehensive-brightgreen)]()
 [![Paper](https://img.shields.io/badge/paper-aligned-blue)]()
 
-> **Note**: This repository contains the complete architecture implementation with comprehensive test suite aligned with paper specifications.
-> Trained model weights are not included - users should train on their own datasets.
+> **Project Status**: This is a **completed learning project** (November 2025). Development has concluded. The implementation is fully functional and paper-aligned, but the model does not perform competitively on downstream tasks. This repository serves as a reference implementation and learning artifact.
 
-A knowledge-graph-enhanced transformer for code understanding, based on the GraphMERT architecture.
-(Currently working on getting some training data.)
+## What I Built
 
-**What is graphmert-codebert-base** It's CodeBERT (RoBERTa trained on code) enhanced with graph structure. It learns from both the *syntax* of code (tokens) and its *semantics* (knowledge graph relations like "function X calls function Y").
+GraphMERT is a knowledge-graph-enhanced transformer for code understanding, built on CodeBERT (RoBERTa pre-trained on code) with novel graph-aware components. The implementation faithfully follows the [GraphMERT paper](https://arxiv.org/abs/2510.09580) architecture:
 
-Concepts adapted from this paper: https://arxiv.org/abs/2510.09580
+- **Hierarchical Graph Attention (H-GAT)**: Fuses code token embeddings with knowledge graph relation embeddings
+- **Attention Decay Mask**: Graph-distance-aware attention (λ^GELU(√distance - p))
+- **Leafy Chain Graphs**: Novel data structure linking 128 code tokens to 896 KG triple leaves
+- **Dual Training Objectives**: 60% MLM (token prediction) + 40% MNM (relation prediction)
+- **~125M parameters**: CodeBERT-base + H-GAT layer
 
-November 10th: Finished first successfull training run: https://wandb.ai/humanjesse-humanjesse/graphmert-codebert-initial-h100/
-  Working on sanity checks and initial evaluation
-## Key Features
+The model was trained on 10,485 examples from 10 Python repositories (Flask, Django, FastAPI, Pandas, NumPy, scikit-learn, Requests, Click, pytest, httpie), with 747K extracted semantic triples across 12 relation types.
 
-- **Leafy Chain Graphs**: Innovative data structure linking code tokens to knowledge graph triples
-- **H-GAT Layer**: Hierarchical Graph Attention for fusing text with graph structure
-- **Attention Decay Mask**: Graph-distance-aware attention mechanism
-- **Dual Training**: MLM (Masked Language Modeling) + MNM (Masked Node Modeling)
-- **Built on CodeBERT**: Leverages existing code understanding, adds graph reasoning
+## What I Learned
 
-## Architecture
+**The Good**:
+- ✅ Successfully implemented a complex graph-enhanced transformer from scratch
+- ✅ Built a comprehensive test suite (11 tests) validating paper alignment
+- ✅ Achieved 97.6% MNM accuracy (far exceeding 70% target) - the model learned to predict semantic relations
+- ✅ Proper gradient flow, loss balance, and architectural correctness validated
 
-```
-Code Input → AST Parser → Knowledge Graph Triples
-                ↓
-         Leafy Chain Graph
-                ↓
-    [CodeBERT + H-GAT + Decay Mask]
-                ↓
-     Graph-Enhanced Representations
-```
+**The Challenge**:
+- ❌ **Poor downstream performance**: The graph enhancements degraded performance compared to training without H-GAT
+  - CodeSearchNet: 0.60 MRR (with H-GAT) vs 0.96 MRR (without H-GAT)
+  - PY150 token completion: 35% accuracy vs 76% for CodeGPT baseline
+- ❌ **Small dataset**: 10K examples vs paper's 350K - likely insufficient for graph learning
+- ❌ **Lack of clear objective**: Focused on implementing techniques without a specific downstream task goal
 
-### Core Components
+**Key Takeaway**: *"I should have picked a clear objective for building a model instead of focusing so much on implementing the paper's methods arbitrarily. Poor design decisions on my part have yielded a model that does not perform well. Some concepts and ideas from this project are interesting and I may adapt them to future efforts where graphs may be more applicable."*
 
-1. **Base Model**: CodeBERT (microsoft/codebert-base)
-2. **Graph Layer**: H-GAT fuses token embeddings with KG relation embeddings
-3. **Attention Mask**: Exponential decay based on graph distance
-4. **Training**: 60% MLM (predict masked tokens) + 40% MNM (predict masked relations)
+For detailed metrics, ablation studies, and analysis, see **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)**.
 
-### Model Parameters
+---
 
-**When using CodeBERT-base (recommended):**
-- Hidden size: 768 (from CodeBERT)
-- Layers: 12 (from CodeBERT)
-- Attention heads: 12 (from CodeBERT)
-- Total parameters: ~125M (CodeBERT) + H-GAT layer
+## Repository Contents
 
-**Paper's medical model (trained from scratch):**
-- Hidden size: 512
-- Layers: 12
-- Attention heads: 8
-- Total parameters: ~80M
+This repository contains:
+- **Fully functional implementation** of GraphMERT architecture
+- **Comprehensive test suite** validating paper alignment
+- **Training pipeline** with MLM + MNM dual objectives
+- **Pre-trained model checkpoints** (epoch 13, 25 epochs total)
+- **Evaluation results** on CodeSearchNet and PY150
+- **Ablation studies** comparing with/without H-GAT
+- **Documentation** of architecture, training, and evaluation
 
-Note: This implementation uses pretrained CodeBERT, so it inherits CodeBERT's architecture (768 hidden size).
+### Key Files
+- `PROJECT_SUMMARY.md` - Comprehensive project summary with all metrics and lessons learned
+- `graphmert/` - Main model implementation
+- `tests/` - Comprehensive test suite (test_fixes.py has 10 paper-aligned tests)
+- `trained_models/` - Checkpoints from training runs
+- `evaluation_results/` - CodeSearchNet, PY150, and faithfulness check results
+- `docs/` - Additional documentation and analysis
 
-## Installation
+---
+
+## Installation & Usage
+
+If you want to explore the implementation or use it as a reference:
 
 ```bash
 # Clone the repository
 git clone https://github.com/humanjesse/graphmert-codebert-base.git
 cd graphmert-codebert-base
 
-# Create virtual environment (recommended)
+# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac (Windows: venv\Scripts\activate)
+source venv/bin/activate  # Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Run comprehensive test suite (validates all 11 components against paper)
-python test_fixes.py
+# Run comprehensive test suite
+python tests/test_fixes.py
 ```
 
-**Requirements:**
-- Python 3.8+
-- PyTorch 2.0+
-- transformers, torch-geometric, networkx
-- GPU recommended for training (CPU works but is slow)
-
-## Quick Start
-
-### 1. Try the Demo
-
-```bash
-python examples/quick_start.py
-```
-
-This will:
-- Parse sample code and extract knowledge graph triples
-- Build leafy chain graphs
-- Initialize GraphMERT from CodeBERT
-- Show graph-enhanced vs. standard encoding
-
-### 2. Train on Your Data
-
-Prepare your code dataset (one sample per line or blank-line separated):
-
-```bash
-# Your data file: data/my_code.txt
-def fibonacci(n):
-    if n <= 1:
-        return n
-    return fibonacci(n-1) + fibonacci(n-2)
-
-class Stack:
-    def __init__(self):
-        self.items = []
-```
-
-Train the model:
-
-```bash
-python train.py \
-  --data_path examples/sample_data.txt \
-  --num_epochs 25 \
-  --batch_size 32 \
-  --output_dir ./checkpoints
-```
-
-### 3. Use the Trained Model
+### Quick Demo
 
 ```python
 from graphmert import GraphMERTModel
 from transformers import RobertaTokenizer
 
-# Load trained model
-model = GraphMERTModel.from_pretrained("./checkpoints/checkpoint-epoch-25")
+# Load pre-trained model
+model = GraphMERTModel.from_pretrained("./trained_models/run_epoch14_20251110/checkpoints/checkpoint_epoch_13.pt")
 tokenizer = RobertaTokenizer.from_pretrained("microsoft/codebert-base")
 
-# Encode code
+# Encode code with graph structure
 code = "def hello(name): print(name)"
 inputs = tokenizer(code, return_tensors="pt")
-
 outputs = model(**inputs)
 embeddings = outputs.last_hidden_state  # Graph-enhanced representations
 ```
+
+See `examples/quick_start.py` for a complete working example.
+
+---
+
+## Architecture Overview
+
+```
+Code Input → AST Parser → Knowledge Graph Triples
+                ↓
+         Leafy Chain Graph (128 roots + 896 leaves)
+                ↓
+    [CodeBERT + H-GAT + Attention Decay Mask]
+                ↓
+     Graph-Enhanced Representations
+```
+
+**Training Objectives**:
+1. **MLM (60%)**: Predict masked code tokens (standard BERT)
+2. **MNM (40%)**: Predict masked graph relations (novel GraphMERT objective)
+
+Combined Loss: `L = 0.6 * L_MLM + 0.4 * L_MNM`
+
+---
+
+## Performance Summary
+
+### Pre-training Faithfulness (Epoch 13)
+| Test | Target | Result | Status |
+|------|--------|--------|--------|
+| MNM Learning | >70% | **97.6%** | ✓ Pass |
+| Syntactic Contamination | <15% | **17.6%** | ✗ Fail |
+| Relation Gradient Flow | Exists | **Yes** | ✓ Pass |
+| Loss Balance | 0.05-2.0 | **0.37** | ✓ Pass |
+| H-GAT Impact | <0.95 | **0.89** | ✓ Pass |
+
+### Downstream Tasks
+| Task | WITH H-GAT | WITHOUT H-GAT | Baseline |
+|------|-----------|---------------|----------|
+| CodeSearchNet MRR | 0.60 | 0.96* | CodeBERT: 0.71 |
+| PY150 Accuracy | 35% | - | CodeGPT: 76% |
+
+*Note: High ablation score likely inflated by overfitting to small validation set
+
+**Conclusion**: Graph enhancements provide strong pre-training signal (97.6% MNM accuracy) but fail to transfer to downstream tasks. Small dataset (10K vs 350K in paper) and architectural mismatch with downstream tasks (encoder vs decoder for completion) are likely factors.
+
+---
 
 ## Project Structure
 
 ```
 graphmert/
-├── graphmert/
-│   ├── models/
-│   │   ├── graphmert.py          # Main GraphMERT model
-│   │   ├── h_gat.py              # Hierarchical Graph Attention layer
-│   │   └── attention_mask.py     # Graph-aware attention decay
-│   ├── data/
-│   │   ├── leafy_chain.py        # Leafy chain graph data structure
-│   │   ├── code_parser.py        # AST parsing to extract triples
-│   │   └── graph_builder.py      # Build graphs from code
-│   └── training/
-│       ├── losses.py             # MLM + MNM loss functions
-│       └── trainer.py            # Training pipeline
-├── examples/
-│   ├── quick_start.py            # Demo script
-│   └── sample_data.txt           # Example code samples
-├── configs/
-│   └── default.yaml              # Training configuration
-├── train.py                      # Main training script
-├── test_installation.py          # Installation test
-├── README.md                     # This file
-└── ARCHITECTURE.md               # Detailed architecture guide
-
-## How It Works
-
-### 1. Extract Knowledge Graph Triples
-
-```python
-Code:  def hello(name): print(name)
-
-Triples extracted:
-  (hello, parameter_of, name)
-  (hello, calls, print)
-  (print, uses, name)
+├── graphmert/              # Main implementation
+│   ├── models/            # GraphMERT, H-GAT, attention mask
+│   ├── data/              # Leafy chain graphs, AST parsing
+│   └── training/          # Training loop, losses
+├── tests/                 # Comprehensive test suite
+├── evaluation/            # Evaluation scripts
+├── trained_models/        # Model checkpoints
+├── evaluation_results/    # Results from all evaluations
+├── docs/                  # Documentation and analysis
+├── examples/              # Demo scripts
+└── PROJECT_SUMMARY.md     # Detailed metrics and lessons learned
 ```
 
-### 2. Create Leafy Chain Graph
-
-```
-Roots (tokens):    ["def", "hello", "(", "name", ")", ":", ...]
-Leaves (triples):  [(hello, parameter_of, name), (hello, calls, print), ...]
-Edges:             token "hello" → connected to triples 0 and 1
-                   token "name" → connected to triples 0 and 2
-```
-
-### 3. Graph-Enhanced Encoding
-
-```python
-# Standard CodeBERT: Only sees tokens
-embedding = encoder(["def", "hello", "(", "name", ...])
-
-# GraphMERT: Sees tokens + their semantic relations
-embedding = encoder(
-    tokens=["def", "hello", "(", "name", ...],
-    graph=[(hello, parameter_of, name), (hello, calls, print), ...]
-)
-# Result: "hello" embedding now includes information about its parameters and what it calls
-```
-
-## Training
-
-The model is trained with two objectives:
-
-### MLM (Masked Language Modeling)
-Predict masked code tokens (standard BERT objective):
-```
-Input:  def [MASK](name): print(name)
-Target: "hello"
-```
-
-### MNM (Masked Node Modeling)
-Predict masked graph relations (novel GraphMERT objective):
-```
-Input graph:  (hello, [MASK], name)
-Target:       "parameter_of"
-```
-
-### Combined Loss
-`L = 0.6 * L_MLM + 0.4 * L_MNM`
-
-This teaches the model to understand BOTH code syntax AND semantic structure.
-
-## Configuration
-
-Edit `configs/default.yaml` to customize:
-
-```yaml
-model:
-  base_model: "microsoft/codebert-base"
-  hidden_size: 512
-  num_layers: 12
-  num_attention_heads: 8
-
-training:
-  num_epochs: 25
-  batch_size: 32
-  learning_rate: 0.0004
-  lambda_mlm: 0.6  # 60% MLM, 40% MNM
-```
-
-## Command-Line Options
-
-```bash
-python train.py \
-  --data_path <path-to-code-samples> \
-  --output_dir ./checkpoints \
-  --num_epochs 25 \
-  --batch_size 32 \
-  --learning_rate 4e-4 \
-  --lambda_mlm 0.6 \
-  --use_wandb  # Optional: log to Weights & Biases
-```
-
-## Performance Tips
-
-1. **Start small**: Test on 1,000 samples before training on full dataset
-2. **GPU recommended**: Training on CPU is very slow (~100x slower)
-3. **Adjust batch size**: Reduce if you get OOM errors
-4. **Use gradient accumulation**: If you need larger effective batch size
-5. **Monitor both losses**: MLM and MNM should both decrease during training
-
-## Extending GraphMERT
-
-### Add Support for New Languages
-
-Currently supports Python. To add JavaScript/Java/etc:
-
-```python
-# In graphmert/data/code_parser.py
-class JavaScriptParser:
-    def parse(self, code):
-        # Use a JS AST parser
-        # Extract triples
-        return triples
-```
-
-### Add New Relation Types
-
-```python
-# In graphmert/data/code_parser.py
-class PythonTripleExtractor(ast.NodeVisitor):
-    def visit_YourNode(self, node):
-        self.triples.append(Triple(
-            head=...,
-            relation="your_new_relation",
-            tail=...
-        ))
-```
-
-### Use Different Base Models
-
-```python
-# Try RoBERTa, GraphCodeBERT, or other compatible models
-model = GraphMERTModel.from_codebert(
-    codebert_model_name="roberta-base"  # or "huggingface/CodeBERTa-small-v1"
-)
-```
+---
 
 ## Testing
 
-The repository includes **test_fixes.py** - a comprehensive 1,283-line test suite validating:
+Run the comprehensive test suite to validate implementation:
 
-1. ✅ Hidden size matches CodeBERT (768)
-2. ✅ Attention decay formula (λ^GELU(√distance - p))
-3. ✅ H-GAT has no cross-token attention leakage
-4. ✅ Floyd-Warshall multi-hop distance computation
-5. ✅ Span masking with geometric distribution
-6. ✅ MNM (Masked Node Modeling) loss
-7. ✅ Combined MLM+MNM loss (μ=1)
-8. ✅ End-to-end forward pass with graphs
-9. ✅ Decay mask integration
-10. ✅ Shared relation embeddings
+```bash
+python tests/test_fixes.py
+```
 
-Run tests: `python test_fixes.py`
+Tests validate:
+- ✅ Attention decay formula (λ^GELU(√distance - p))
+- ✅ H-GAT layer isolation (no cross-token leakage)
+- ✅ Floyd-Warshall distance computation
+- ✅ Span masking with geometric distribution
+- ✅ MNM loss and combined MLM+MNM loss
+- ✅ End-to-end forward pass with graphs
+- ✅ Shared relation embeddings
 
-## Troubleshooting
-
-**Q: Installation fails?**
-- Ensure Python 3.8+, install PyTorch first: `pip install torch`
-
-**Q: No graph connections?**
-- Run `python examples/quick_start.py` to verify parsing
-- Ensure code has functions/classes (not just plain statements)
-
-**Q: Out of memory?**
-- Reduce `--batch_size` (try 16 or 8)
-- Reduce `max_seq_len` in config
+---
 
 ## Citation
 
-If you use GraphMERT in your research, please cite:
+Original GraphMERT paper:
 
 ```bibtex
 @article{graphmert2024,
-  title={GraphMERT: A Graph-Enhanced Transformer for Code Understanding},
-  year={2024}
+  title={GraphMERT: A Graph-Enhanced Transformer},
+  year={2024},
+  url={https://arxiv.org/abs/2510.09580}
 }
 ```
 
+---
+
 ## License
 
-MIT License (or specify your license)
+MIT License
 
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
+---
 
 ## Acknowledgments
 
-- Based on the GraphMERT paper (2024)
-- Built on CodeBERT by Microsoft
-- Inspired by Graph Attention Networks
+This project was a valuable learning experience in implementing research papers and understanding the challenges of graph-enhanced transformers. While the downstream performance didn't meet expectations, the process of building, testing, and evaluating a complex architecture from scratch was immensely educational.
+
+**Lessons for future projects**:
+1. Start with a clear downstream task objective
+2. Ensure adequate training data (350K examples, not 10K)
+3. Validate architectural choices against task requirements
+4. Run ablation studies early to validate component contributions
+
+Built with CodeBERT by Microsoft, inspired by Graph Attention Networks and the GraphMERT paper.
